@@ -89,6 +89,7 @@ struct Material
 struct MeshInfo
 {
     uint32_t materialIndex;     // マテリアルインデックス
+    uint32_t materialNameIndex; // マテリアル名インデックス
     uint32_t startIndex;        // スタートインデックス  
     uint32_t primCount;         // プリミティブ数
 };

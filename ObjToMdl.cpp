@@ -399,6 +399,7 @@ static void CreateBufferData( Object& object,
             auto it = materialIndexMap.find(subMesh.material);
             if (it == materialIndexMap.end()) throw std::runtime_error("Material not found: " + subMesh.material);
             data.materialIndex = it->second;                                // マテリアルインデックス
+            data.materialNameIndex = it->second;                            // マテリアル名インデックス
             data.startIndex = static_cast<uint32_t>(indexBuffer.size());    // スタートインデックス
             data.primCount = static_cast<uint32_t>(subMesh.faces.size());   // プリミティブ数
             meshInfo.push_back(data);
@@ -433,6 +434,7 @@ static void CreateBufferData( Object& object,
 static int OutputMdl( const char* fname,
                       std::vector<Material>& materials,
                       std::vector<MeshInfo>& meshInfo,
+                      std::vector<std::string>& materialNames,
                       std::vector<std::string>& textures,
                       std::vector<VertexPositionNormalTextureTangent>& vertexBuffer,
                       std::vector<uint16_t>& indexBuffer )
@@ -455,6 +457,16 @@ static int OutputMdl( const char* fname,
         uint32_t size = static_cast<uint32_t>(texture.size());
         ofs.write(reinterpret_cast<const char*>(&size), sizeof(size));
         ofs.write(texture.data(), size);
+    }
+
+    // マテリアル名テーブル
+    uint32_t materialName_cnt = static_cast<uint32_t>(materialNames.size());
+    ofs.write(reinterpret_cast<const char*>(&materialName_cnt), sizeof(materialName_cnt));
+    for (const auto& name : materialNames)
+    {
+        uint32_t len = static_cast<uint32_t>(name.size());
+        ofs.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        ofs.write(name.data(), len);
     }
 
     // マテリアル
@@ -612,6 +624,13 @@ int wmain(int argc, wchar_t* wargv[])
     std::vector<std::string> textures;
     if (AnalyzeMtl(object.mtllib.c_str(), materials, materialIndexMap, textures)) return 1;
 
+    // マテリアル名の配列を作成
+    std::vector<std::string> materialNames(materials.size());
+    for (const auto& [name, index] : materialIndexMap)
+    {
+        materialNames[index] = name;
+    }
+
     // 頂点、インデックスを取得
     std::vector<MeshInfo> meshInfo;
     std::vector<VertexPositionNormalTextureTangent> vertexBuffer;
@@ -623,7 +642,7 @@ int wmain(int argc, wchar_t* wargv[])
 
     // ----- 書き出し ----- //
 
-    if (OutputMdl(output.c_str(), materials, meshInfo, textures, vertexBuffer, indexBuffer)) return 1;
+    if (OutputMdl(output.c_str(), materials, meshInfo, materialNames, textures, vertexBuffer, indexBuffer)) return 1;
 
     return 0;
 }
