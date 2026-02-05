@@ -234,7 +234,7 @@ static int AnalyzeObj(const char* fname, Object& object)
         // テクスチャ座標
         else if (type == "vt")
         {
-            // Blender（UVの原点＝左下）のため
+            // BlenderのV座標は上が＋
             XMFLOAT2 uv = ReadFloat2(iss);
             uv.y = 1.0f - uv.y;
             object.texcoords.push_back(uv);
@@ -287,6 +287,39 @@ static int AnalyzeObj(const char* fname, Object& object)
     return 0;
 }
 
+// テクスチャ名の登録関数
+static int32_t RegisterTextureName(std::istringstream& iss,
+    std::unordered_map<std::string, int32_t>& textureIndexMap,
+    std::vector<std::string>& textures,
+    int32_t& t_index
+)
+{
+    // 最後のトークンをファイル名として取得
+    std::string token, name;
+    while (iss >> token)
+    {
+        name = token;
+    }
+
+    // エラー
+    if (name.empty()) return -1;
+
+    // パス名を除去
+    name = GetFileNameOnly(name);
+
+    // 既に同じテクスチャ名が登録済みの場合も考慮
+    auto [it, inserted] = textureIndexMap.try_emplace(name, t_index);
+
+    // 新しく挿入された
+    if (inserted)
+    {
+        t_index++;
+        textures.push_back(name);
+    }
+
+    return it->second;
+}
+
 // mtlファイルの情報取得関数
 static int AnalyzeMtl( const char* fname,
                        std::vector<Material>& materials,
@@ -306,7 +339,7 @@ static int AnalyzeMtl( const char* fname,
     std::unordered_map<std::string, int32_t> textureIndexMap;
 
     uint32_t m_index = 0;
-    int32_t t_Index = 0;
+    int32_t t_index = 0;
 
     std::string line;
     while (std::getline(ifs, line))
@@ -360,36 +393,23 @@ static int AnalyzeMtl( const char* fname,
             materials.back().emissiveColor = ReadFloat3(iss);
         }
 
-        // テクスチャ（ディフューズ）
+        // テクスチャ（ベースカラー）
         else if (type == "map_Kd")
         {
-            // map_Kd の最後のトークンをファイル名として取得
-            std::string token, name;
-            while (iss >> token)
-            {
-                name = token;
-            }
-
-            if (name.empty()) continue;
-
-            // パス名を除去
-            name = GetFileNameOnly(name);
-
-            // 既に同じテクスチャ名が登録済みの場合も考慮
-            auto [it, inserted] = textureIndexMap.try_emplace(name, t_Index);
-
-            if (inserted)
-            {
-                t_Index++;
-                textures.push_back(name);
-            }
-
             if (!materials.empty())
             {
-                materials.back().textureIndex = it->second;
+                materials.back().textureIndex_BaseColor = RegisterTextureName(iss, textureIndexMap, textures, t_index);
             }
         }
 
+        // テクスチャ（法線マップ）
+        else if (type == "map_Bump")
+        {
+            if (!materials.empty())
+            {
+                materials.back().textureIndex_NormalMap = RegisterTextureName(iss, textureIndexMap, textures, t_index);
+            }
+        }
     }
 
     return 0;
@@ -401,7 +421,20 @@ static VertexPositionNormalTextureTangent MakeVertex(Object& object, const FaceI
     VertexPositionNormalTextureTangent v = {};
 
     v.position = object.positions[face.v];
-    v.normal = (face.vn >= 0) ? object.normals[face.vn] : XMFLOAT3(0.0f, 0.0f, 1.0f);
+
+    if (face.vn >= 0)
+    {
+        // 法線を正規化
+        XMVECTOR n = XMLoadFloat3(&object.normals[face.vn]);
+        n = XMVector3Normalize(n);
+        XMStoreFloat3(&v.normal, n);
+    }
+    else
+    {
+        // ダミー
+        v.normal = XMFLOAT3(0.0f, 0.0f, 1.0f);
+    }
+
     v.texcoord = (face.vt >= 0) ? object.texcoords[face.vt] : XMFLOAT2(0.0f, 0.0f);
 
     return v;
@@ -533,12 +566,44 @@ static std::string JoinPath(const std::string& path, const std::string& filename
 }
 
 // 頂点データに接線を追加する関数
-static void GenerateTangents( std::vector<VertexPositionNormalTextureTangent>& vertices,
-                              const std::vector<uint16_t>& indices )
+static void GenerateTangents(
+    std::vector<VertexPositionNormalTextureTangent>& vertices,
+    const std::vector<uint16_t>& indices)
 {
     std::vector<XMFLOAT3> tanAccum(vertices.size(), { 0,0,0 });
     std::vector<XMFLOAT3> bitanAccum(vertices.size(), { 0,0,0 });
 
+    auto add = [&](uint32_t idx, const XMFLOAT3& t, const XMFLOAT3& b)
+        {
+            tanAccum[idx].x += t.x;
+            tanAccum[idx].y += t.y;
+            tanAccum[idx].z += t.z;
+
+            bitanAccum[idx].x += b.x;
+            bitanAccum[idx].y += b.y;
+            bitanAccum[idx].z += b.z;
+        };
+
+    auto set = [&](uint32_t idx, const XMFLOAT3& t, const XMFLOAT3& b)
+        {
+            tanAccum[idx] = t;
+            bitanAccum[idx] = b;
+        };
+
+    // 三角形の各頂点の法線が同じ向きならフラットシェーディングの面と判定
+    auto isFlatFace = [&](uint32_t i0, uint32_t i1, uint32_t i2)
+        {
+            XMVECTOR n0 = XMLoadFloat3(&vertices[i0].normal);
+            XMVECTOR n1 = XMLoadFloat3(&vertices[i1].normal);
+            XMVECTOR n2 = XMLoadFloat3(&vertices[i2].normal);
+
+            float d01 = XMVectorGetX(XMVector3Dot(n0, n1));
+            float d12 = XMVectorGetX(XMVector3Dot(n1, n2));
+
+            return d01 > 0.999f && d12 > 0.999f;
+        };
+
+    // ---- 三角形ごと ----
     for (size_t i = 0; i + 2 < indices.size(); i += 3)
     {
         uint32_t i0 = indices[i + 0];
@@ -558,14 +623,14 @@ static void GenerateTangents( std::vector<VertexPositionNormalTextureTangent>& v
         float du2 = v2.texcoord.x - v0.texcoord.x;
         float dv2 = v2.texcoord.y - v0.texcoord.y;
 
-        XMVECTOR e1 = p1 - p0;
-        XMVECTOR e2 = p2 - p0;
-
         float denom = du1 * dv2 - du2 * dv1;
         if (fabs(denom) < 1e-6f)
             continue;
 
         float f = 1.0f / denom;
+
+        XMVECTOR e1 = p1 - p0;
+        XMVECTOR e2 = p2 - p0;
 
         XMVECTOR T = (e1 * dv2 - e2 * dv1) * f;
         XMVECTOR B = (e2 * du1 - e1 * du2) * f;
@@ -574,30 +639,31 @@ static void GenerateTangents( std::vector<VertexPositionNormalTextureTangent>& v
         XMStoreFloat3(&t, T);
         XMStoreFloat3(&b, B);
 
-        auto add = [&](uint32_t idx)
-            {
-                tanAccum[idx].x += t.x;
-                tanAccum[idx].y += t.y;
-                tanAccum[idx].z += t.z;
+        bool flat = isFlatFace(i0, i1, i2);
 
-                bitanAccum[idx].x += b.x;
-                bitanAccum[idx].y += b.y;
-                bitanAccum[idx].z += b.z;
-            };
-
-        add(i0);
-        add(i1);
-        add(i2);
+        if (flat)
+        {
+            // フラット：上書き
+            set(i0, t, b);
+            set(i1, t, b);
+            set(i2, t, b);
+        }
+        else
+        {
+            // スムーズ：加算
+            add(i0, t, b);
+            add(i1, t, b);
+            add(i2, t, b);
+        }
     }
 
-    // 正規化 & handedness
+    // ---- 正規化 & handedness ----
     for (size_t i = 0; i < vertices.size(); i++)
     {
         XMVECTOR N = XMLoadFloat3(&vertices[i].normal);
         XMVECTOR T = XMLoadFloat3(&tanAccum[i]);
         XMVECTOR B = XMLoadFloat3(&bitanAccum[i]);
 
-        // Gram-Schmidt
         T = XMVector3Normalize(T - N * XMVector3Dot(N, T));
 
         float w = (XMVectorGetX(
@@ -606,7 +672,6 @@ static void GenerateTangents( std::vector<VertexPositionNormalTextureTangent>& v
 
         XMFLOAT3 t;
         XMStoreFloat3(&t, T);
-
         vertices[i].tangent = { t.x, t.y, t.z, w };
     }
 }
@@ -671,15 +736,4 @@ int wmain(int argc, wchar_t* wargv[])
 
     return 0;
 }
-
-// プログラムの実行: Ctrl + F5 または [デバッグ] > [デバッグなしで開始] メニュー
-// プログラムのデバッグ: F5 または [デバッグ] > [デバッグの開始] メニュー
-
-// 作業を開始するためのヒント: 
-//    1. ソリューション エクスプローラー ウィンドウを使用してファイルを追加/管理します 
-//   2. チーム エクスプローラー ウィンドウを使用してソース管理に接続します
-//   3. 出力ウィンドウを使用して、ビルド出力とその他のメッセージを表示します
-//   4. エラー一覧ウィンドウを使用してエラーを表示します
-//   5. [プロジェクト] > [新しい項目の追加] と移動して新しいコード ファイルを作成するか、[プロジェクト] > [既存の項目の追加] と移動して既存のコード ファイルをプロジェクトに追加します
-//   6. 後ほどこのプロジェクトを再び開く場合、[ファイル] > [開く] > [プロジェクト] と移動して .sln ファイルを選択します
 

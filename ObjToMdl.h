@@ -72,7 +72,8 @@ struct Material
     DirectX::XMFLOAT3 specularColor;    // スペキュラー色
     float specularPower;                // スペキュラーパワー
     DirectX::XMFLOAT3 emissiveColor;    // エミッシブ色
-    int32_t textureIndex;               // テクスチャインデックス
+    int32_t textureIndex_BaseColor;     // テクスチャインデックス（ベースカラー）
+    int32_t textureIndex_NormalMap;     // テクスチャインデックス（法線マップ）
 
     Material()
         : ambientColor{ 1.0f, 1.0f, 1.0f }
@@ -80,7 +81,8 @@ struct Material
         , specularColor{ 1.0f, 1.0f, 1.0f }
         , specularPower{ 100.0f }
         , emissiveColor{ 0.0f, 0.0f, 0.0f }
-        , textureIndex{ -1 }
+        , textureIndex_BaseColor{ -1 }
+        , textureIndex_NormalMap{ -1 }
     {
     }
 };
