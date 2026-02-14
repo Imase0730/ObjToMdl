@@ -13,7 +13,7 @@
 //      |マテリアル名(char)               |
 //
 // マテリアルの数(uint32_t)
-//      マテリアル(Material*cnt)
+//      マテリアル(MaterialInfo*cnt)
 //
 // メッシュ情報の数(uint32_t)
 //      メッシュ情報(MeshInfo*cnt)
@@ -31,9 +31,72 @@
 #include <windows.h>
 #include <vector>
 #include <fstream>
+#include <string>
+#include <unordered_map>
 #include "cxxopts.hpp"
 
 using namespace DirectX;
+using namespace ObjToImdl;
+
+// 面の各頂点を構成するインデックス
+struct FaceIndex
+{
+    int v;  // 位置
+    int vt; // テクスチャ座標
+    int vn; // 法線
+
+    bool operator==(const FaceIndex& other) const
+    {
+        return v == other.v && vt == other.vt && vn == other.vn;
+    }
+};
+
+// ハッシュ値を生成する関数
+namespace std
+{
+    template <>
+    struct hash<FaceIndex>
+    {
+        size_t operator()(const FaceIndex& f) const
+        {
+            size_t h1 = std::hash<int>()(f.v);
+            size_t h2 = std::hash<int>()(f.vt);
+            size_t h3 = std::hash<int>()(f.vn);
+
+            // ハッシュ合成
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        }
+    };
+}
+
+// 面（三角形）
+struct Face
+{
+    FaceIndex faceIndices[3];
+};
+
+// サブメッシュ
+struct SubMesh
+{
+    std::string material;       // マテリアル名
+    std::vector<Face> faces;    // 面（三角形）情報
+};
+
+// メッシュ
+struct Mesh
+{
+    std::vector<SubMesh> subMeshs;  // サブメッシュ
+};
+
+// obj形式の情報取得用構造体
+struct Object
+{
+    std::string mtllib;                         // マテリアルファイル名
+    std::vector<DirectX::XMFLOAT3> positions;   // 位置
+    std::vector<DirectX::XMFLOAT3> normals;     // 法線
+    std::vector<DirectX::XMFLOAT2> texcoords;   // テクスチャ座標
+    std::vector<Mesh> meshes;                   // メッシュ
+};
 
 // パス名付きファイル名のファイル名を取得する関数
 static std::string GetFileNameOnly(const std::string& path)
@@ -322,7 +385,7 @@ static int32_t RegisterTextureName(std::istringstream& iss,
 
 // mtlファイルの情報取得関数
 static int AnalyzeMtl( const char* fname,
-                       std::vector<Material>& materials,
+                       std::vector<MaterialInfo>& materials,
                        std::unordered_map<std::string, uint32_t>& materialIndexMap,
                        std::vector<std::string>& textures )
 {
@@ -361,12 +424,6 @@ static int AnalyzeMtl( const char* fname,
             materials.resize(materials.size() + 1);
             materialIndexMap[name] = m_index;
             m_index++;
-        }
-
-        // アンビエント色
-        else if (type == "Ka")
-        {
-            materials.back().ambientColor = ReadFloat3(iss);
         }
 
         // ディフューズ色
@@ -490,7 +547,7 @@ static void CreateBufferData( Object& object,
 
 // ファイルへの出力関数
 static int OutputMdl( const char* fname,
-                      std::vector<Material>& materials,
+                      std::vector<MaterialInfo>& materials,
                       std::vector<MeshInfo>& meshInfo,
                       std::vector<std::string>& materialNames,
                       std::vector<std::string>& textures,
@@ -530,7 +587,7 @@ static int OutputMdl( const char* fname,
     // マテリアル
     uint32_t material_cnt = static_cast<uint32_t>(materials.size());
     ofs.write(reinterpret_cast<const char*>(&material_cnt), sizeof(material_cnt));
-    ofs.write(reinterpret_cast<const char*>(materials.data()), sizeof(Material) * material_cnt);
+    ofs.write(reinterpret_cast<const char*>(materials.data()), sizeof(MaterialInfo) * material_cnt);
 
     // メッシュ情報
     uint32_t mesh_cnt = static_cast<uint32_t>(meshInfo.size());
@@ -709,7 +766,7 @@ int wmain(int argc, wchar_t* wargv[])
     object.mtllib = JoinPath(GetDirectoryPath(input), object.mtllib);
 
     // マテリアルを取得
-    std::vector<Material> materials;
+    std::vector<MaterialInfo> materials;
     std::unordered_map<std::string, uint32_t> materialIndexMap;
     std::vector<std::string> textures;
     if (AnalyzeMtl(object.mtllib.c_str(), materials, materialIndexMap, textures)) return 1;
